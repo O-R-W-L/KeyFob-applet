@@ -5,8 +5,16 @@
  * Applet supports following operations
  * 1. Stores the KeyFOB details during manufacturing mode
  * 2. Retrieval of KeyFOB details anytime
+ * 3. Save or Update CVM pin during manufacturing mode and in every session after CVM pin verification
+ * 4. CVM pin verification
+ * 5. Retrieve KeyFOB association status
+ * 6. Store the pairing key for association of KeyFOB with an ORWL device  after CVM pin verification
+ * 7. Read the paired key after CVM pin verification
  */
 package com.orwlkeypair;
+
+import org.globalplatform.CVM;
+import org.globalplatform.GPSystem;
 
 import javacard.framework.APDU;
 import javacard.framework.Applet;
@@ -27,6 +35,12 @@ public class ORWL_Keypair extends Applet {
 	final static byte INS_STORE_KEYFOB_SERIAL_NUM = (byte) 0x2A;
 	final static byte INS_STORE_KEYFOB_UID = (byte) 0x2B;
 	final static byte INS_STORE_KEYFOB_NAME = (byte) 0x2C;
+	final static byte INS_STORE_CVM_PIN = (byte) 0x2D;
+
+	final static byte INS_VERIFY_CVM_PIN = (byte) 0x13;
+	final static byte INS_ASSOCIATE_STATUS = (byte) 0x14;
+	final static byte INS_STORE_KEY = (byte) 0x15;
+	final static byte INS_READ_KEY = (byte) 0x16;
 
 	/**
      * The nameAssociatedFlag can have following values: false => Ready for KeyFOB Name association(not yet associated)
@@ -46,6 +60,18 @@ public class ORWL_Keypair extends Applet {
      */
 	private boolean uidAssociatedFlag = false;
 
+	/**
+     * The cvmAssociatedFlag can have following values: false => Ready for CVM Pin first time store
+     * 													true => CVM Pin cannot be stored
+     */
+	private boolean cvmAssociatedFlag = false;
+
+	/**
+     * The keyAssociationFlag can have following values: false => KeyFOB ready for association with any ORWL device(not yet associated)
+     * 													true => already associated with an ORWL device
+     */
+	private boolean keyAssociationFlag = false;
+
 	/** Used for storing KeyFOB Name*/
 	private byte[] keyfobName;
 	private static final short LENGTH_KEYFOB_NAME_BYTES = 254;
@@ -58,8 +84,17 @@ public class ORWL_Keypair extends Applet {
 	private byte[] keyfobUID;
 	private static final byte LENGTH_KEYFOB_UID_BYTES = 16;
 
-	/**
-	 * The Constructor registers the applet instance with the JCRE.
+	/** Used for storing 128-bytes Unique key which is used for pairing KeyFOB with ORWL device*/
+	private byte[] pairKey;
+	private static final short PAIR_KEY_LENGTH = 128;
+
+	/** CVM pin length*/
+	private static final byte CVM_PIN_LENGTH = 6;
+
+	/** CVM instance*/
+	CVM cvm;
+
+	/**The Constructor registers the applet instance with the JCRE.
 	 * The applet instance is created in the install() method.
 	 * @param bArray the array containing installation parameters.
 	 * @param bOffset the starting offset in bArray.
@@ -71,6 +106,9 @@ public class ORWL_Keypair extends Applet {
 		keyfobName = new byte[LENGTH_KEYFOB_NAME_BYTES];
 		keyfobSerialNum = new byte[LENGTH_KEYFOB_SERIAL_NUM_BYTES];
 		keyfobUID = new byte[LENGTH_KEYFOB_UID_BYTES];
+
+		pairKey = new byte[PAIR_KEY_LENGTH];
+		cvm = GPSystem.getCVM(GPSystem.CVM_GLOBAL_PIN);
 
 		register(bArray, (short) (bOffset + 1), bArray[bOffset]);
 	}
@@ -122,6 +160,21 @@ public class ORWL_Keypair extends Applet {
 				break;
 			case INS_GET_KEYFOB_UID:
 				getKeyFobUID(apdu);
+				break;
+			case INS_STORE_CVM_PIN:
+				parseAndUpdateCVMPin(apdu);
+				break;
+			case INS_VERIFY_CVM_PIN:
+				verifyCVM(apdu);
+				break;
+			case INS_ASSOCIATE_STATUS:
+				assosiateStatus(apdu);
+				break;
+			case INS_STORE_KEY:
+				storePairingKey(apdu);
+				break;
+			case INS_READ_KEY:
+				getPairedKey(apdu);
 				break;
 			default:
 				ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
@@ -279,6 +332,184 @@ public class ORWL_Keypair extends Applet {
 			/** Send R-APDU*/
 			apdu.setOutgoingAndSend((short) 0, (short) (LENGTH_KEYFOB_UID_BYTES + (byte)0x02));
 		}
+	}
+
+	/**
+	 * INS 2D - Save CVM Pin
+	 * Store/Update the CVM Pin for the first time during production mode and after successful pin verification during every session of communication
+	 * @param apdu - the incoming APDU consists of CVM pin
+	 * @exception ISOException - with the response bytes per ISO 7816-4
+	 */
+	private void parseAndUpdateCVMPin(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+		/**Check for CVM Pin verification */
+		boolean cvmVerifyFlag = cvmPinVerificationStatus();
+		/**Check for P1 Parameter value */
+		checkForP1Val(buffer);
+		/**Check for Proper CVM pin length and CVM pin association */
+		if (bytesRecv != CVM_PIN_LENGTH)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(cvmAssociatedFlag == false || (cvmVerifyFlag == true && cvmAssociatedFlag == true)){
+			/**CVM pin update */
+			cvm.resetAndUnblockState();
+			cvm.update(buffer, ISO7816.OFFSET_CDATA, bytesRecv, CVM.FORMAT_BCD);
+			cvm.resetState();
+			/**CVM pin verification */
+			cvm.verify(buffer, ISO7816.OFFSET_CDATA, bytesRecv, CVM.FORMAT_BCD);
+			/**Retrieve CVM pin retry limit remaining */
+			buffer[0] = cvm.getTriesRemaining();
+			cvmAssociatedFlag = true;
+		}
+		else
+			buffer[0] = (byte)0x0E;
+		/** Send R-APDU*/
+		apdu.setOutgoingAndSend((short) 0, (byte)0x01);
+	}
+
+	/**
+	 * INS 13 - Verify CVM Pin
+	 * Verify the CVM Pin required for every session of keypair
+	 * @param apdu - the incoming APDU consists of CVM pin
+	 * @exception ISOException - with the response bytes per ISO 7816-4
+	 */
+	private void verifyCVM(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+		/**Check for P1 Parameter value */
+		checkForP1Val(buffer);
+		/**Check for Proper CVM pin length and CVM pin association status */
+		if (bytesRecv != CVM_PIN_LENGTH)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if( cvmAssociatedFlag == false )
+			buffer[0] = (byte)0x1E;
+		else {
+			/**CVM pin verification */
+			byte result = (byte)cvm.verify(buffer, ISO7816.OFFSET_CDATA, bytesRecv, CVM.FORMAT_BCD);
+			if(result != (byte)0x00)
+				buffer[0] = (byte)0x0E;
+			else
+				buffer[0] = (byte)0x01;
+		}
+		/** Send R-APDU*/
+		apdu.setOutgoingAndSend((short) 0, (byte)0x01);
+
+	}
+
+	/**
+	 * INS 14 - KeyFOB Association Status
+	 * Sends the association status of KeyFOB => Accept(0x01) indicating Unassociated and reject(0x0E)indicating Associated Status
+     * @param apdu - the incoming APDU
+     * @exception ISOException - with the response bytes per ISO 7816-4
+	 */
+	private void assosiateStatus(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		/**Check for P1 Parameter value */
+		checkForP1Val(buffer);
+		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+		/**Retrieve CVM Verification and block status */
+		boolean cvmVerifyFlag = cvmPinVerificationStatus();
+		boolean cvmBlockFlag = cvmPinBlockStatus();
+		/**Check for CVM pin verification, block and association status */
+		if (bytesRecv != (byte)0x00)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(cvmBlockFlag == true )
+			buffer[0] = (byte)0x2E;
+		else if( cvmVerifyFlag == false || cvmAssociatedFlag == false)
+			buffer[0] = (byte)0x1E;
+		else if( keyAssociationFlag == true )
+			buffer[0] = (byte)0x0E;
+		else
+			buffer[0] = (byte)0x01;
+		/** Send R-APDU*/
+		apdu.setOutgoingAndSend((short) 0, (byte)0x01);
+	}
+
+
+	/**
+	 * INS 15 - Save Pairing Key
+	 * Store the key on the card as part of association process
+     * @param apdu - the incoming APDU consists of key of 128 bytes
+     * @exception ISOException - with the response bytes per ISO 7816-4
+     */
+	private void storePairingKey(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		short bytesRecv = apdu.setIncomingAndReceive();
+		/**Check for P1 Parameter value */
+		checkForP1Val(buffer);
+		/**Retrieve CVM Verification and block status */
+		boolean cvmVerifyFlag = cvmPinVerificationStatus();
+		boolean cvmBlockFlag = cvmPinBlockStatus();
+		/**Check for Pair key length, CVM pin verification, block and Paired key association status */
+		if (bytesRecv != PAIR_KEY_LENGTH)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(cvmBlockFlag == true )
+			buffer[0] = (byte)0x2E;
+		else if( cvmVerifyFlag == false || cvmAssociatedFlag == false)
+			buffer[0] = (byte)0x1E;
+		else if( keyAssociationFlag == true )
+			buffer[0] = (byte)0x0E;
+		else{
+			/**Save pairing key */
+			Util.arrayCopy(buffer, ISO7816.OFFSET_CDATA, pairKey, (short)0, (short)PAIR_KEY_LENGTH);
+			keyAssociationFlag = true;
+			buffer[0] = (byte)0x01;
+		}
+		/** Send R-APDU*/
+        apdu.setOutgoingAndSend((short) 0, (byte)0x01);
+	}
+
+
+	/**
+	 * INS 16 - Read Paired Key
+	 * Retrieve associated key if pairing had already happened
+     * @param apdu - the incoming APDU
+	 * @return Paired key
+     * @exception ISOException - with the response bytes per ISO 7816-4
+     */
+	private void getPairedKey(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		/**Check for P1 Parameter value */
+		checkForP1Val(buffer);
+		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+		/**Retrieve CVM Verification and block status */
+		boolean cvmVerifyFlag = cvmPinVerificationStatus();
+		boolean cvmBlockFlag = cvmPinBlockStatus();
+		/**Check for CVM pin verification, block and Paired key association status */
+		if (bytesRecv != (byte)0x00)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(cvmBlockFlag == true )
+			buffer[0] = (byte)0x2E;
+		else if( cvmVerifyFlag == false || cvmAssociatedFlag == false)
+			buffer[0] = (byte)0x1E;
+		else if( keyAssociationFlag == false )
+			 buffer[0] = (byte)0x0E;
+		else{
+			buffer[0] = (byte)0x01;
+			/**Retrieve pairing key */
+			Util.arrayCopy(pairKey, (short)0, buffer, (short)0x01, PAIR_KEY_LENGTH);
+			/** Send R-APDU*/
+			apdu.setOutgoing();
+			apdu.setOutgoingLength((short) (PAIR_KEY_LENGTH + 1));
+			apdu.sendBytesLong(buffer,(short) 0, (short) (PAIR_KEY_LENGTH + 1));
+			return;
+		}
+		/** Send R-APDU*/
+		apdu.setOutgoingAndSend((short) 0, (byte)0x01);
+	}
+
+	/**
+	 * Checks for the CVM pin verification status
+	 */
+	private boolean cvmPinVerificationStatus() {
+		return cvm.isVerified();
+	}
+
+	/**
+	 * Checks for the CVM pin block status
+	 */
+	private boolean cvmPinBlockStatus() {
+		return cvm.isBlocked();
 	}
 
 	/**
