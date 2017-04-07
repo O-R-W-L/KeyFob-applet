@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<JCProjectParameters>
+ <ProjectName>ORWL_Keypair</ProjectName>
+ <ConverterVersion>jcdk 2.2.1</ConverterVersion>
+ <SimulationType>SkySIM Argo 2.4</SimulationType>
+ <JCPackageParameters>
+  <Aid SpecificName="PackageAid">0A 0B 0C 0D 0E 0A</Aid>
+  <JCConverterOptions>-debug -out CAP EXP</JCConverterOptions>
+  <PackageName>com.orwlkeypair</PackageName>
+  <PackageVersion>1.0</PackageVersion>
+  <JCAppletParameters>
+   <Aid SpecificName="AppletClassAid">0A 0B 0C 0D 0E 02</Aid>
+   <AppletName>ORWL_Keypair</AppletName>
+  </JCAppletParameters>
+ </JCPackageParameters>
+</JCProjectParameters>
