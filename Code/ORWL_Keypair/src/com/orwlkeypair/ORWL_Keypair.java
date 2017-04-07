@@ -10,6 +10,7 @@
  * 5. Retrieve KeyFOB association status
  * 6. Store the pairing key for association of KeyFOB with an ORWL device  after CVM pin verification
  * 7. Read the paired key after CVM pin verification
+ * 8. Implements 3DES Algorithm for data encryption and decryption
  */
 package com.orwlkeypair;
 
@@ -20,7 +21,11 @@ import javacard.framework.APDU;
 import javacard.framework.Applet;
 import javacard.framework.ISO7816;
 import javacard.framework.ISOException;
+import javacard.framework.JCSystem;
 import javacard.framework.Util;
+import javacard.security.DESKey;
+import javacard.security.KeyBuilder;
+import javacardx.crypto.Cipher;
 
 public class ORWL_Keypair extends Applet {
 
@@ -94,6 +99,20 @@ public class ORWL_Keypair extends Applet {
 	/** CVM instance*/
 	CVM cvm;
 
+	/** Cipher instance*/
+	private Cipher cipherInstance;
+
+	/** 3DES key instance*/
+	private DESKey desKey;
+
+	/** 3DES shared secret key */
+	private byte[] sharedSecretKey = {
+			0x01,0x23,0x45,0x67,(byte) 0x89,(byte) 0xab,(byte) 0xcd,(byte) 0xef,0x01,0x23,0x45,0x67,(byte) 0x89,(byte) 0xab,(byte) 0xcd,
+			(byte) 0xef,0x01,0x23,0x45,0x67,(byte) 0x89,(byte) 0xab,(byte) 0xcd,(byte) 0xef};
+
+	/** 3DES common Initialization vector value */
+	private byte[] IVVal = {0x0f,0x1e,0x2d,0x3c,0x4b,0x5a,0x69,0x78};
+
 	/**The Constructor registers the applet instance with the JCRE.
 	 * The applet instance is created in the install() method.
 	 * @param bArray the array containing installation parameters.
@@ -109,6 +128,11 @@ public class ORWL_Keypair extends Applet {
 
 		pairKey = new byte[PAIR_KEY_LENGTH];
 		cvm = GPSystem.getCVM(GPSystem.CVM_GLOBAL_PIN);
+
+		/** Initialize 3-DES cipher instance and sets shared secret key and IV value*/
+		cipherInstance = Cipher.getInstance(Cipher.ALG_DES_CBC_NOPAD, false);
+		desKey = (DESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_DES, KeyBuilder.LENGTH_DES3_3KEY, false);
+		desKey.setKey(sharedSecretKey, (short) 0);
 
 		register(bArray, (short) (bOffset + 1), bArray[bOffset]);
 	}
@@ -338,6 +362,7 @@ public class ORWL_Keypair extends Applet {
 	 * INS 2D - Save CVM Pin
 	 * Store/Update the CVM Pin for the first time during production mode and after successful pin verification during every session of communication
 	 * @param apdu - the incoming APDU consists of CVM pin
+	 * @param apdu - the incoming APDU consists of CVM pin(Encrypted form during every session communication and plain command during manufacture mode)
 	 * @exception ISOException - with the response bytes per ISO 7816-4
 	 */
 	private void parseAndUpdateCVMPin(APDU apdu) {
@@ -345,13 +370,13 @@ public class ORWL_Keypair extends Applet {
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
 		/**Check for CVM Pin verification */
 		boolean cvmVerifyFlag = cvmPinVerificationStatus();
-		/**Check for P1 Parameter value */
-		checkForP1Val(buffer);
+		byte pinLength = buffer[ISO7816.OFFSET_P1];
 		/**Check for Proper CVM pin length and CVM pin association */
-		if (bytesRecv != CVM_PIN_LENGTH)
+		if (pinLength != CVM_PIN_LENGTH || (cvmAssociatedFlag == false && bytesRecv != CVM_PIN_LENGTH))
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		else if(cvmAssociatedFlag == false || (cvmVerifyFlag == true && cvmAssociatedFlag == true)){
-			/**CVM pin update */
+		else if(cvmAssociatedFlag == false)
+			updateCVMPin(apdu, buffer, pinLength, ISO7816.OFFSET_CDATA);
+		else if(cvmVerifyFlag == true && cvmAssociatedFlag == true){
 			cvm.resetAndUnblockState();
 			cvm.update(buffer, ISO7816.OFFSET_CDATA, bytesRecv, CVM.FORMAT_BCD);
 			cvm.resetState();
@@ -360,10 +385,33 @@ public class ORWL_Keypair extends Applet {
 			/**Retrieve CVM pin retry limit remaining */
 			buffer[0] = cvm.getTriesRemaining();
 			cvmAssociatedFlag = true;
+			/**Create temp buffer to hold the decrypted data */
+			byte[] temp = JCSystem.makeTransientByteArray(bytesRecv, JCSystem.CLEAR_ON_RESET);
+			/**Set initialize secret values and decrypt the data received */
+			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, temp, (short) 0);
+			/**Copy temp buffer decrypted data to APDU buffer for CVM pin update and verification */
+			Util.arrayCopy(temp, (short)0, buffer, (short)0, pinLength);
+			updateCVMPin(apdu, buffer, pinLength, (short) 0);
 		}
-		else
+		else{
 			buffer[0] = (byte)0x0E;
-		/** Send R-APDU*/
+			apdu.setOutgoingAndSend((short) 0, (byte)0x01);
+		}
+	}
+
+	/**
+	 * Updates and verifies the CVM pin
+	 * @param buffer - holds the CVM pin value(decrypted during every session communication and plain during manufacture mode)
+	 */
+	private void updateCVMPin(APDU apdu, byte[] buffer, byte pinLength, short offset) {
+		/**CVM Pin update */
+		cvm.update(buffer, offset, pinLength, CVM.FORMAT_BCD);
+		cvm.resetState();
+		/**CVM Pin verification */
+		cvm.verify(buffer, offset, pinLength, CVM.FORMAT_BCD);
+		buffer[0] = cvm.getTriesRemaining();
+		cvmAssociatedFlag = true;
 		apdu.setOutgoingAndSend((short) 0, (byte)0x01);
 	}
 
@@ -371,21 +419,27 @@ public class ORWL_Keypair extends Applet {
 	 * INS 13 - Verify CVM Pin
 	 * Verify the CVM Pin required for every session of keypair
 	 * @param apdu - the incoming APDU consists of CVM pin
+	 * @param apdu - the incoming APDU consists of encrypted CVM pin value
 	 * @exception ISOException - with the response bytes per ISO 7816-4
 	 */
 	private void verifyCVM(APDU apdu) {
 		byte[] buffer = apdu.getBuffer();
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
-		/**Check for P1 Parameter value */
-		checkForP1Val(buffer);
+		byte pinLength = buffer[ISO7816.OFFSET_P1];
 		/**Check for Proper CVM pin length and CVM pin association status */
-		if (bytesRecv != CVM_PIN_LENGTH)
+		if (pinLength != CVM_PIN_LENGTH)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 		else if( cvmAssociatedFlag == false )
 			buffer[0] = (byte)0x1E;
 		else {
+			byte[] temp = JCSystem.makeTransientByteArray(bytesRecv, JCSystem.CLEAR_ON_RESET);
+			/**Set initialize secret values and decrypt the data received */
+			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, temp, (short) 0);
+			/**Copy temp buffer decrypted data to APDU buffer for CVM pin verification */
+			Util.arrayCopy(temp, (short)0, buffer, (short)0, pinLength);
 			/**CVM pin verification */
-			byte result = (byte)cvm.verify(buffer, ISO7816.OFFSET_CDATA, bytesRecv, CVM.FORMAT_BCD);
+			byte result = (byte)cvm.verify(buffer, (short)0, pinLength, CVM.FORMAT_BCD);
 			if(result != (byte)0x00)
 				buffer[0] = (byte)0x0E;
 			else
@@ -429,19 +483,18 @@ public class ORWL_Keypair extends Applet {
 	/**
 	 * INS 15 - Save Pairing Key
 	 * Store the key on the card as part of association process
-     * @param apdu - the incoming APDU consists of key of 128 bytes
+     * @param apdu - the incoming APDU consists of encrypted key of 128 bytes
      * @exception ISOException - with the response bytes per ISO 7816-4
      */
 	private void storePairingKey(APDU apdu) {
 		byte[] buffer = apdu.getBuffer();
 		short bytesRecv = apdu.setIncomingAndReceive();
-		/**Check for P1 Parameter value */
-		checkForP1Val(buffer);
+		byte keyLength = buffer[ISO7816.OFFSET_P1];
 		/**Retrieve CVM Verification and block status */
 		boolean cvmVerifyFlag = cvmPinVerificationStatus();
 		boolean cvmBlockFlag = cvmPinBlockStatus();
 		/**Check for Pair key length, CVM pin verification, block and Paired key association status */
-		if (bytesRecv != PAIR_KEY_LENGTH)
+		if (keyLength != (byte)PAIR_KEY_LENGTH)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 		else if(cvmBlockFlag == true )
 			buffer[0] = (byte)0x2E;
@@ -451,7 +504,13 @@ public class ORWL_Keypair extends Applet {
 			buffer[0] = (byte)0x0E;
 		else{
 			/**Save pairing key */
-			Util.arrayCopy(buffer, ISO7816.OFFSET_CDATA, pairKey, (short)0, (short)PAIR_KEY_LENGTH);
+			byte[] temp = JCSystem.makeTransientByteArray(PAIR_KEY_LENGTH, JCSystem.CLEAR_ON_RESET);
+			/**Set initialize secret values and decrypt the data received */
+			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, temp, (short) 0);
+
+			/**Copy temp buffer decrypted data to paiKey buffer */
+			Util.arrayCopy(temp, (short)0, pairKey, (short)0, (short)PAIR_KEY_LENGTH);
 			keyAssociationFlag = true;
 			buffer[0] = (byte)0x01;
 		}
@@ -464,7 +523,7 @@ public class ORWL_Keypair extends Applet {
 	 * INS 16 - Read Paired Key
 	 * Retrieve associated key if pairing had already happened
      * @param apdu - the incoming APDU
-	 * @return Paired key
+	 * @return Paired key in encrypted form
      * @exception ISOException - with the response bytes per ISO 7816-4
      */
 	private void getPairedKey(APDU apdu) {
@@ -487,7 +546,12 @@ public class ORWL_Keypair extends Applet {
 		else{
 			buffer[0] = (byte)0x01;
 			/**Retrieve pairing key */
-			Util.arrayCopy(pairKey, (short)0, buffer, (short)0x01, PAIR_KEY_LENGTH);
+			byte[] temp = JCSystem.makeTransientByteArray(PAIR_KEY_LENGTH, JCSystem.CLEAR_ON_RESET);
+			/**Copy paiKey buffer data to temp buffer for encryption*/
+			Util.arrayCopy(pairKey, (short)0, temp, (short)0x00, PAIR_KEY_LENGTH);
+			/**Set initialize secret values and encrypt the data to be sent */
+			cipherInstance.init(desKey, Cipher.MODE_ENCRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(temp, (short) 0, PAIR_KEY_LENGTH, buffer, (short) 1);
 			/** Send R-APDU*/
 			apdu.setOutgoing();
 			apdu.setOutgoingLength((short) (PAIR_KEY_LENGTH + 1));
