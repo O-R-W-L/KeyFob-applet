@@ -3,14 +3,18 @@
  * Package AID: 0A 0B 0C 0D 0E 0A
  * Applet AID: 0A 0B 0C 0D 0E 02
  * Applet supports following operations
- * 1. Stores the KeyFOB details during manufacturing mode
+ * 1. Stores the KeyFOB serial number during manufacturing mode
  * 2. Retrieval of KeyFOB details anytime
- * 3. Save or Update CVM pin during manufacturing mode and in every session after CVM pin verification
- * 4. CVM pin verification
- * 5. Retrieve KeyFOB association status
- * 6. Store the pairing key for association of KeyFOB with an ORWL device  after CVM pin verification
- * 7. Read the paired key after CVM pin verification
- * 8. Implements 3DES Algorithm for data encryption and decryption
+ * 3. Retrieve KeyFOB association status
+ * 4. ECDH key pair generation and secret key generation
+ * 5. Exchange and store the seedX and seedY values
+ * 6. CVM pin verification
+ * 7. Save the KeyFOB name
+ * 8. Save all the encryption/decryption keys and complete the association process
+ * 9. Decrypt and save the Ble seed token using ECDH secret key and seedX
+ * 10. Authenticate the Ble seed challenge, create message digest and encrypt it using the seedY and ECDH key
+ * 11. Implements 3DES Algorithm for data encryption and decryption
+ * 12. SHA-1 algorithm is used for message digest creation
  */
 package com.orwlkeypair;
 
@@ -29,29 +33,33 @@ import javacard.security.ECPublicKey;
 import javacard.security.KeyAgreement;
 import javacard.security.KeyBuilder;
 import javacard.security.KeyPair;
+import javacard.security.MessageDigest;
+import javacard.security.RandomData;
 import javacardx.crypto.Cipher;
 
-public class ORWL_Keypair extends Applet {
+public class ORWL_Keypair extends Applet{
 
 	/**Supported Class byte by this applet*/
 	public final static byte CLA = (byte) 0x90;
 
 	/**Supported INS bytes by this applet*/
 	final static byte INS_GET_KEYFOB_SERIAL_NUM = (byte) 0x20;
-	final static byte INS_GET_KEYFOB_UID = (byte) 0x21;
 	final static byte INS_GET_KEYFOB_NAME = (byte) 0x22;
 
 	final static byte INS_STORE_KEYFOB_SERIAL_NUM = (byte) 0x2A;
-	final static byte INS_STORE_KEYFOB_UID = (byte) 0x2B;
 	final static byte INS_STORE_KEYFOB_NAME = (byte) 0x2C;
-	final static byte INS_STORE_CVM_PIN = (byte) 0x2D;
 
 	final static byte INS_GET_PUBLIC_KEY = (byte) 0x11;
 	final static byte INS_GENERATE_SECRET_KEY = (byte) 0x12;
+	final static byte INS_CONFIRM_SECRET_KEY = (byte) 0x10;
 	final static byte INS_VERIFY_CVM_PIN = (byte) 0x13;
 	final static byte INS_ASSOCIATE_STATUS = (byte) 0x14;
-	final static byte INS_STORE_KEY = (byte) 0x15;
-	final static byte INS_READ_KEY = (byte) 0x16;
+
+	final static byte INS_SAVE_SEED_KEY = (byte) 0x15;
+	final static byte INS_AUTH_SEED_KEY = (byte) 0x16;
+	final static byte INS_SAVE_SECRET_KEYS = (byte) 0x17;
+	final static byte INS_SAVE_SHARE_SEED_X = (byte) 0x18;
+	final static byte INS_GET_SHARE_SEED_Y = (byte) 0x19;
 
 	/**
      * The nameAssociatedFlag can have following values: false => Ready for KeyFOB Name association(not yet associated)
@@ -66,44 +74,37 @@ public class ORWL_Keypair extends Applet {
 	private boolean serialAssociatedFlag = false;
 
 	/**
-     * The uidAssociatedFlag can have following values: false => Ready for KeyFOB UID association(not yet associated)
-     * 													true => KeyFOB UID already associated
-     */
-	private boolean uidAssociatedFlag = false;
-
-	/**
-     * The cvmAssociatedFlag can have following values: false => Ready for CVM Pin first time store
-     * 													true => CVM Pin cannot be stored
-     */
-	private boolean cvmAssociatedFlag = false;
-
-	/**
      * The keyAssociationFlag can have following values: false => KeyFOB ready for association with any ORWL device(not yet associated)
-     * 													true => already associated with an ORWL device
+     * 													 true => already associated with an ORWL device
      */
 	private boolean keyAssociationFlag = false;
 
+	private boolean seedXSaveFlag = false;
+
 	/** Used for storing KeyFOB Name*/
 	private byte[] keyfobName;
-	private static final short LENGTH_KEYFOB_NAME_BYTES = 255;
+	private static final short LENGTH_KEYFOB_NAME_BYTES = 19;
 
 	/** Used for storing KeyFOB Serial Number*/
 	private byte[] keyfobSerialNum;
-	private static final byte LENGTH_KEYFOB_SERIAL_NUM_BYTES = 16;
+	private static final byte LENGTH_KEYFOB_SERIAL_NUM_BYTES = 4;
 
-	/** Used for storing KeyFOB UID*/
-	private byte[] keyfobUID;
-	private static final byte LENGTH_KEYFOB_UID_BYTES = 16;
+	/** SHA-1 generated encrypted message digest length*/
+	private static final short MESSAGE_DIGEST_LENGTH = 24;
 
-	/** Used for storing 128-bytes Unique key which is used for pairing KeyFOB with ORWL device*/
-	private byte[] pairKey;
-	private static final short PAIR_KEY_LENGTH = 128;
+	/** Used for storing BLE seed*/
+	private byte[] bleSeed;
+	private static final short SEED_LENGTH = 40;
+	private static final short CHALLENGE_LENGTH = 32;
 
-	/** CVM pin length*/
-	private static final byte CVM_PIN_LENGTH = 6;
+	/** Used for storing shared seedX and seedY values*/
+	private byte[] sharedSeedX;
+	private byte[] sharedSeedY;
+	private static final short SHARED_SEED_LENGTH = 24;
 
 	/** CVM instance*/
 	CVM cvm;
+	private final static byte[] cvmData = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
 
 	/** Cipher instance*/
 	private Cipher cipherInstance;
@@ -140,12 +141,22 @@ public class ORWL_Keypair extends Applet {
 	ECPrivateKey privateKey;
 	ECPublicKey publicKey;
 	private static final short PUBLIC_KEY_LENGTH = 49;
+
 	/** ECDH instance */
 	KeyAgreement ecdhInstance;
 
 	/** 3DES shared secret key */
 	private byte[] sharedSecretKey;
 	private static final short SHARED_SECRET_KEY_LENGTH = 24;
+
+	/** Sample data used for confirming the ECDH secret key generated on both the sides */
+	private final static byte[] sampleData = {0x4f, 0x52, 0x57, 0x4c, 0x4b, 0x45, 0x59, 0x46};
+
+	/** Random data generator instance */
+	RandomData randomData;
+
+	/** SHA-1 generated message digest instance */
+	MessageDigest digestinstance;
 
 	/**The Constructor registers the applet instance with the JCRE.
 	 * The applet instance is created in the install() method.
@@ -158,17 +169,50 @@ public class ORWL_Keypair extends Applet {
 		/** Initialize the KeyFOB buffers*/
 		keyfobName = new byte[LENGTH_KEYFOB_NAME_BYTES];
 		keyfobSerialNum = new byte[LENGTH_KEYFOB_SERIAL_NUM_BYTES];
-		keyfobUID = new byte[LENGTH_KEYFOB_UID_BYTES];
 
-		pairKey = new byte[PAIR_KEY_LENGTH];
+		bleSeed = new byte[SEED_LENGTH];
+		sharedSeedX = new byte[SHARED_SEED_LENGTH];
+		sharedSeedY = new byte[SHARED_SEED_LENGTH];
+
+		/** Create CVM interface handle and update the fixed CVM pin and its limit */
 		cvm = GPSystem.getCVM(GPSystem.CVM_GLOBAL_PIN);
+		cvm.setTryLimit((byte) 5);
+		cvm.update(cvmData, (short)0, (byte) cvmData.length, CVM.FORMAT_BCD);
+		cvm.resetState();
 
-		/** Initialize 3-DES cipher instance*/
+		/** Create 3-DES cipher and key instance*/
 		cipherInstance = Cipher.getInstance(Cipher.ALG_DES_CBC_NOPAD, false);
 		desKey = (DESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_DES, KeyBuilder.LENGTH_DES3_3KEY, false);
 		sharedSecretKey = new byte[SHARED_SECRET_KEY_LENGTH];
 
+		/** Create random data generator instance and message digest object*/
+		randomData = RandomData.getInstance(RandomData.ALG_PSEUDO_RANDOM);
+		digestinstance = MessageDigest.getInstance(MessageDigest.ALG_SHA, false);
+
+		/** Generate Public Private Keypair used for ECDH secret key generation*/
+		KeyPair key = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_192);
+
+		privateKey = (ECPrivateKey) key.getPrivate();
+		publicKey = (ECPublicKey) key.getPublic();
+
+		/** Set domain parameters to public and private keys*/
+		privateKey.setFieldFP(primeP, (short) 0, (short) primeP.length);
+		privateKey.setA(coefficientA, (short) 0, (short) coefficientA.length);
+		privateKey.setB(coefficientB, (short) 0, (short) coefficientB.length);
+		privateKey.setG(fixedPointG, (short) 0, (short) fixedPointG.length);
+		privateKey.setR(orderR, (short) 0, (short) orderR.length);
+
+		publicKey.setFieldFP(primeP, (short) 0, (short) primeP.length);
+		publicKey.setA(coefficientA, (short) 0, (short) coefficientA.length);
+		publicKey.setB(coefficientB, (short) 0, (short) coefficientB.length);
+		publicKey.setG(fixedPointG, (short) 0, (short) fixedPointG.length);
+		publicKey.setR(orderR, (short) 0, (short) orderR.length);
+
+		key.genKeyPair();
+
+		/** Applet registration with JCRE*/
 		register(bArray, (short) (bOffset + 1), bArray[bOffset]);
+
 	}
 
 	/**
@@ -191,7 +235,7 @@ public class ORWL_Keypair extends Applet {
 	public void process(APDU apdu) throws ISOException {
 		byte buffer[] = apdu.getBuffer();
 
-		/** check SELECT APDU command*/
+		/** Check SELECT APDU command*/
 		if (selectingApplet())
 			return;
 		else if(buffer[ISO7816.OFFSET_CLA] != CLA)
@@ -213,32 +257,35 @@ public class ORWL_Keypair extends Applet {
 			case INS_GET_KEYFOB_SERIAL_NUM:
 				getKeyFobSerial(apdu);
 				break;
-			case INS_STORE_KEYFOB_UID:
-				storeKeyFobUID(apdu);
-				break;
-			case INS_GET_KEYFOB_UID:
-				getKeyFobUID(apdu);
-				break;
-			case INS_STORE_CVM_PIN:
-				parseAndUpdateCVMPin(apdu);
-				break;
 			case INS_VERIFY_CVM_PIN:
 				verifyCVM(apdu);
 				break;
 			case INS_ASSOCIATE_STATUS:
 				assosiateStatus(apdu);
 				break;
-			case INS_STORE_KEY:
-				storePairingKey(apdu);
+			case INS_SAVE_SEED_KEY:
+				seedSave(apdu);
 				break;
-			case INS_READ_KEY:
-				getPairedKey(apdu);
+			case INS_AUTH_SEED_KEY:
+				seedAuthenticate(apdu);
 				break;
 			case INS_GET_PUBLIC_KEY:
 				getPublickey(apdu);
 				break;
 			case INS_GENERATE_SECRET_KEY:
 				generateSecretKey(apdu);
+				break;
+			case INS_CONFIRM_SECRET_KEY:
+				confirmSecretKey(apdu);
+				break;
+			case INS_SAVE_SECRET_KEYS:
+				saveSecretKeys(apdu);
+				break;
+			case INS_SAVE_SHARE_SEED_X:
+				saveShareSeedX(apdu);
+				break;
+			case INS_GET_SHARE_SEED_Y:
+				retrieveShareSeedY(apdu);
 				break;
 			default:
 				ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
@@ -247,28 +294,41 @@ public class ORWL_Keypair extends Applet {
 
 	/**
 	 * INS 2C - Save KeyFOB Name
-	 * Store the KeyFOB Name for the first time during production mode
+	 * Store the KeyFOB Name during authentication process
 	 * @param apdu - the incoming APDU consists of KeyFOB Name
 	 * @exception ISOException - with the response bytes per ISO 7816-4
 	 */
 	private void storeKeyFobName(APDU apdu) {
 		byte[] buffer = apdu.getBuffer();
-		/**Check for P1 Parameter value */
-		checkForP1Val(buffer);
-		/**Check for KeyFOB Name association */
-		if( nameAssociatedFlag )
+		byte keyLength = buffer[ISO7816.OFFSET_P1];
+		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+		/**Check for KeyFOB Name association, CVM pin verification, block and Paired key association status */
+		if (keyLength != (byte)LENGTH_KEYFOB_NAME_BYTES)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(cvmPinBlockStatus() )
+			ISOException.throwIt((short) 0x9D61);
+		else if(!cvmPinVerificationStatus())
+			ISOException.throwIt((short) 0x9840);
+		else if(keyAssociationFlag)
+			ISOException.throwIt((short) 0x6669);
+		else if( nameAssociatedFlag )
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
 		else{
-			byte bytesRecv = (byte) apdu.setIncomingAndReceive();
-			Util.arrayCopy(buffer, ISO7816.OFFSET_CDATA, keyfobName, (short)0, (short)bytesRecv);
+			/** Initializes ECDH secret value and decrypt the data received */
+			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, buffer, (short) 0);
+
+			/** Store the KeyFOB name */
+			Util.arrayCopy(buffer, (short) 0, keyfobName, (short)0, LENGTH_KEYFOB_NAME_BYTES);
 			nameAssociatedFlag = true;
 		}
 	}
 
 	/**
 	 * INS 22 - Retrieve KeyFOB Name
-	 * Retrieve KeyFOB Name if KeyFOB already has a name associated during production mode
+	 * Retrieve KeyFOB Name if KeyFOB already has a name associated during authentication process
 	 * @param apdu - the incoming APDU
+	 * @return KeyFOB Name
 	 * @exception ISOException - with the response bytes per ISO 7816-4
 	 */
 	private void getKeyFobName(APDU apdu) {
@@ -279,11 +339,13 @@ public class ORWL_Keypair extends Applet {
 		/**Check for Proper length and KeyFOB Name association */
 		if (bytesRecv != (byte)0x00)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(!keyAssociationFlag)
+			ISOException.throwIt((short) 0x6669);
 		else if( !nameAssociatedFlag )
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
 		else{
 			Util.arrayCopy(keyfobName, (short)0, buffer, (short)0, LENGTH_KEYFOB_NAME_BYTES);
-			/** Send R-APDU*/
+			/** Send R-APDU containing KeyFOB Name*/
 			apdu.setOutgoingAndSend((short) 0, (short) LENGTH_KEYFOB_NAME_BYTES);
 		}
 	}
@@ -303,6 +365,7 @@ public class ORWL_Keypair extends Applet {
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
 		else{
 			byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+			/** Store the KeyFOB serial number */
 			Util.arrayCopy(buffer, ISO7816.OFFSET_CDATA, keyfobSerialNum, (short)0, (short)bytesRecv);
 			serialAssociatedFlag = true;
 		}
@@ -312,6 +375,7 @@ public class ORWL_Keypair extends Applet {
 	 * INS 20 - Retrieve KeyFOB Serial Number
 	 * Retrieve KeyFOB Serial Number if KeyFOB already has a Serial Number associated during production mode
 	 * @param apdu - the incoming APDU
+	 * @return KeyFOB Serial Number
 	 * @exception ISOException - with the response bytes per ISO 7816-4
 	 */
 	private void getKeyFobSerial(APDU apdu) {
@@ -326,104 +390,9 @@ public class ORWL_Keypair extends Applet {
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
 		else{
 			Util.arrayCopy(keyfobSerialNum, (short)0, buffer, (short)0, LENGTH_KEYFOB_SERIAL_NUM_BYTES);
-			/** Send R-APDU*/
+			/** Send R-APDU containing KeyFOB Serial Number*/
 			apdu.setOutgoingAndSend((short) 0, (short) LENGTH_KEYFOB_SERIAL_NUM_BYTES );
 		}
-	}
-
-	/**
-	 * INS 2B - Save KeyFOB UID
-	 * Store the KeyFOB UID for the first time during production mode
-	 * @param apdu - the incoming APDU
-	 * @exception ISOException - with the response bytes per ISO 7816-4
-	 */
-	private void storeKeyFobUID(APDU apdu) {
-		byte[] buffer = apdu.getBuffer();
-		/**Check for P1 Parameter value */
-		checkForP1Val(buffer);
-		/**Check for KeyFOB UID association */
-		if( uidAssociatedFlag )
-			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
-		else{
-			byte bytesRecv = (byte) apdu.setIncomingAndReceive();
-			Util.arrayCopy(buffer, ISO7816.OFFSET_CDATA, keyfobUID, (short)0, (short)bytesRecv);
-			uidAssociatedFlag = true;
-		}
-	}
-
-	/**
-	 * INS 21 - Retrieve KeyFOB UID
-	 * Retrieve KeyFOB UID if KeyFOB already has a UID associated during production mode
-	 * @param apdu - the incoming APDU
-	 * @exception ISOException - with the response bytes per ISO 7816-4
-	 */
-	private void getKeyFobUID(APDU apdu) {
-		byte[] buffer = apdu.getBuffer();
-		/**Check for P1 Parameter value */
-		checkForP1Val(buffer);
-		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
-		/**Check for Proper length and KeyFOB UID association */
-		if (bytesRecv != (byte)0x00)
-			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		else if( !uidAssociatedFlag )
-			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
-		else{
-			Util.arrayCopy(keyfobUID, (short)0, buffer, (short)0, LENGTH_KEYFOB_UID_BYTES);
-			/** Send R-APDU*/
-			apdu.setOutgoingAndSend((short) 0, (short) LENGTH_KEYFOB_UID_BYTES );
-		}
-	}
-
-	/**
-	 * INS 2D - Save CVM Pin
-	 * Store/Update the CVM Pin for the first time during production mode and after successful pin verification during every session of communication
-	 * @param apdu - the incoming APDU consists of CVM pin(Encrypted form during every session communication and plain command during manufacture mode)
-	 * @exception ISOException - with the response bytes per ISO 7816-4
-	 */
-	private void parseAndUpdateCVMPin(APDU apdu) {
-		byte[] buffer = apdu.getBuffer();
-		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
-		byte pinLength = buffer[ISO7816.OFFSET_P1];
-		/**Check for Proper CVM pin length and CVM pin association and verification */
-		if (pinLength != CVM_PIN_LENGTH || (!cvmAssociatedFlag && bytesRecv != CVM_PIN_LENGTH))
-			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		else if( !cvmAssociatedFlag )
-			updateCVMPin(apdu, buffer, pinLength, ISO7816.OFFSET_CDATA);
-		else if(cvmPinBlockStatus() )
-			ISOException.throwIt((short) 0x9D61);
-		else if(!cvmPinVerificationStatus())
-			ISOException.throwIt((short) 0x9840);
-		else {
-			cvm.resetAndUnblockState();
-			cvm.update(buffer, ISO7816.OFFSET_CDATA, bytesRecv, CVM.FORMAT_BCD);
-			cvm.resetState();
-			/**CVM pin verification */
-			cvm.verify(buffer, ISO7816.OFFSET_CDATA, bytesRecv, CVM.FORMAT_BCD);
-			/**Retrieve CVM pin retry limit remaining */
-			buffer[0] = cvm.getTriesRemaining();
-			cvmAssociatedFlag = true;
-			/**Create temp buffer to hold the decrypted data */
-			byte[] temp = JCSystem.makeTransientByteArray(bytesRecv, JCSystem.CLEAR_ON_RESET);
-			/**Set initialize secret values and decrypt the data received */
-			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
-			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, temp, (short) 0);
-			/**Copy temp buffer decrypted data to APDU buffer for CVM pin update and verification */
-			Util.arrayCopy(temp, (short)0, buffer, (short)0, pinLength);
-			updateCVMPin(apdu, buffer, pinLength, (short) 0);
-		}
-	}
-
-	/**
-	 * Updates and verifies the CVM pin
-	 * @param buffer - holds the CVM pin value(decrypted during every session communication and plain during manufacture mode)
-	 */
-	private void updateCVMPin(APDU apdu, byte[] buffer, byte pinLength, short offset) {
-		/**CVM Pin update */
-		cvm.update(buffer, offset, pinLength, CVM.FORMAT_BCD);
-		cvm.resetState();
-		/**CVM Pin verification */
-		cvm.verify(buffer, offset, pinLength, CVM.FORMAT_BCD);
-		cvmAssociatedFlag = true;
 	}
 
 	/**
@@ -437,19 +406,14 @@ public class ORWL_Keypair extends Applet {
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
 		byte pinLength = buffer[ISO7816.OFFSET_P1];
 		/**Check for Proper CVM pin length, CVM pin association status and 3DES initialization status */
-		if (pinLength != CVM_PIN_LENGTH)
+		if (pinLength != cvmData.length)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		else if( !cvmAssociatedFlag )
-			ISOException.throwIt((short) 0x9802);
 		else if(!DESKeyStatus())
 			ISOException.throwIt((short) 0x6669);
 		else {
-			byte[] temp = JCSystem.makeTransientByteArray(bytesRecv, JCSystem.CLEAR_ON_RESET);
-			/**Set initialize secret values and decrypt the data received */
+			/** Initializes ECDH secret value and decrypt the data received */
 			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
-			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, temp, (short) 0);
-			/**Copy temp buffer decrypted data to APDU buffer for CVM pin verification */
-			Util.arrayCopy(temp, (short)0, buffer, (short)0, pinLength);
+			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, buffer, (short) 0);
 			/**CVM pin verification */
 			byte result = (byte)cvm.verify(buffer, (short)0, pinLength, CVM.FORMAT_BCD);
 			if(result != (byte)0x00)
@@ -459,7 +423,8 @@ public class ORWL_Keypair extends Applet {
 
 	/**
 	 * INS 14 - KeyFOB Association Status
-	 * Sends the association status of KeyFOB => Accept(0x01) indicating Unassociated and reject(0x0E)indicating Associated Status
+	 * Sends the association status of KeyFOB => 90 00 - Unassociated
+	 * 											 69 85 - Associated
      * @param apdu - the incoming APDU
      * @exception ISOException - with the response bytes per ISO 7816-4
 	 */
@@ -471,60 +436,50 @@ public class ORWL_Keypair extends Applet {
 		/**Check for CVM pin verification, block and association status */
 		if (bytesRecv != (byte)0x00)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		else if(cvmPinBlockStatus() )
-			ISOException.throwIt((short) 0x9D61);
-		else if(!cvmAssociatedFlag)
-			ISOException.throwIt((short) 0x9802);
-		else if(!cvmPinVerificationStatus())
-			ISOException.throwIt((short) 0x9840);
 		else if(keyAssociationFlag)
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
 	}
 
 	/**
-	 * INS 15 - Save Pairing Key
-	 * Store the key on the card as part of association process
-     * @param apdu - the incoming APDU consists of encrypted key of 128 bytes
+	 * INS 15 - Save ble seed
+	 * Decrypt and Save the ble seed using ECDH key and seedX as part of association process
+     * @param apdu - the incoming APDU consists of encrypted seed of 40 bytes
      * @exception ISOException - with the response bytes per ISO 7816-4
      */
-	private void storePairingKey(APDU apdu) {
+	private void seedSave(APDU apdu) {
 		byte[] buffer = apdu.getBuffer();
 		short bytesRecv = apdu.setIncomingAndReceive();
-		byte keyLength = buffer[ISO7816.OFFSET_P1];
-
-		/**Check for Pair key length, CVM pin verification, block and Paired key association status */
-		if (keyLength != (byte)PAIR_KEY_LENGTH)
+		/**Check for Seed length, CVM pin verification, block and Paired key association status */
+		if (bytesRecv != (byte)SEED_LENGTH)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 		else if(cvmPinBlockStatus() )
 			ISOException.throwIt((short) 0x9D61);
-		else if(!cvmAssociatedFlag)
-			ISOException.throwIt((short) 0x9802);
 		else if(!cvmPinVerificationStatus())
 			ISOException.throwIt((short) 0x9840);
-		else if( keyAssociationFlag )
+		else if( !keyAssociationFlag )
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
 		else{
-			/**Save pairing key */
-			byte[] temp = JCSystem.makeTransientByteArray(PAIR_KEY_LENGTH, JCSystem.CLEAR_ON_RESET);
-			/**Set initialize secret values and decrypt the data received */
+			/** Initializes ECDH secret value and decrypt the data received */
 			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
-			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, temp, (short) 0);
-
-			/**Copy temp buffer decrypted data to paiKey buffer */
-			Util.arrayCopy(temp, (short)0, pairKey, (short)0, (short)PAIR_KEY_LENGTH);
-			keyAssociationFlag = true;
+			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, buffer, (short) 0);
+			/**Set the 3des key to seedX*/
+			desKey.setKey(sharedSeedX, (short) 0);
+			/** Initializes seedX value and decrypt the data received */
+			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(buffer, (short) 0, bytesRecv, bleSeed, (short) 0);
+			/**Reset the 3des key to ECDH key*/
+			desKey.setKey(sharedSecretKey, (short) 0);
 		}
 	}
 
-
 	/**
-	 * INS 16 - Read Paired Key
-	 * Retrieve associated key if pairing had already happened
+	 * INS 16 - Authenticate ble seed
+	 * Create message digest of the ble challenge and encrypt using seedY and ECDH key as part of association process
      * @param apdu - the incoming APDU
-	 * @return Paired key in encrypted form
+	 * @return Message digest of ble challenge in encrypted form
      * @exception ISOException - with the response bytes per ISO 7816-4
      */
-	private void getPairedKey(APDU apdu) {
+	private void seedAuthenticate(APDU apdu) {
 		byte[] buffer = apdu.getBuffer();
 		/**Check for P1 Parameter value */
 		checkForP1Val(buffer);
@@ -534,24 +489,30 @@ public class ORWL_Keypair extends Applet {
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 		else if(cvmPinBlockStatus() )
 			ISOException.throwIt((short) 0x9D61);
-		else if(!cvmAssociatedFlag)
-			ISOException.throwIt((short) 0x9802);
 		else if(!cvmPinVerificationStatus())
 			ISOException.throwIt((short) 0x9840);
 		else if(!keyAssociationFlag)
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
 		else{
-			/**Retrieve pairing key */
-			byte[] temp = JCSystem.makeTransientByteArray(PAIR_KEY_LENGTH, JCSystem.CLEAR_ON_RESET);
-			/**Copy paiKey buffer data to temp buffer for encryption*/
-			Util.arrayCopy(pairKey, (short)0, temp, (short)0x00, PAIR_KEY_LENGTH);
-			/**Set initialize secret values and encrypt the data to be sent */
+			/**Create message digest of BLE challenge*/
+			short outputLength = digestinstance.doFinal(bleSeed, (short)0, CHALLENGE_LENGTH, buffer, (short)0);
+			Util.arrayCopy(buffer, (short)0x00, buffer, (short)outputLength, (short)(MESSAGE_DIGEST_LENGTH-outputLength));
+
+			/**Set the 3des key to seedY*/
+			desKey.setKey(sharedSeedY, (short) 0);
+			/** Initializes seedY value and encrypt the data */
 			cipherInstance.init(desKey, Cipher.MODE_ENCRYPT, IVVal, (short) 0, (short) IVVal.length);
-			cipherInstance.doFinal(temp, (short) 0, PAIR_KEY_LENGTH, buffer, (short) 0);
-			/** Send R-APDU*/
+			cipherInstance.doFinal(buffer, (short) 0, MESSAGE_DIGEST_LENGTH, buffer, (short) 0);
+			/**Reset the 3des key to ECDH key*/
+			desKey.setKey(sharedSecretKey, (short) 0);
+			/** Initializes ECDH secret value encrypt the data */
+			cipherInstance.init(desKey, Cipher.MODE_ENCRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(buffer, (short) 0, MESSAGE_DIGEST_LENGTH, buffer, (short) 0);
+
+			/** Send R-APDU containing encrypted message digest of ble challenge*/
 			apdu.setOutgoing();
-			apdu.setOutgoingLength((short) PAIR_KEY_LENGTH );
-			apdu.sendBytesLong(buffer,(short) 0, (short) PAIR_KEY_LENGTH );
+			apdu.setOutgoingLength((short) MESSAGE_DIGEST_LENGTH );
+			apdu.sendBytesLong(buffer,(short) 0, (short) MESSAGE_DIGEST_LENGTH );
 		}
 	}
 
@@ -580,32 +541,14 @@ public class ORWL_Keypair extends Applet {
 
 	/**
 	 * INS 11 - Get Public Key
-	 * Generate Public - Private Keypair and retrieve the public key
+	 * Retrieve the public key of generated Public - Private Keypair
      * @param apdu - the incoming APDU
 	 * @return Public key generated on KeyFOB
      * @exception ISOException - with the response bytes per ISO 7816-4
      */
 	private void getPublickey(APDU apdu){
-		/** Generate Public Private Keypair*/
-		KeyPair key = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_192);
-
-		privateKey = (ECPrivateKey) key.getPrivate();
-		publicKey = (ECPublicKey) key.getPublic();
-
-		/** Set domain parameters to public and private keys*/
-		privateKey.setFieldFP(primeP, (short) 0, (short) primeP.length);
-		privateKey.setA(coefficientA, (short) 0, (short) coefficientA.length);
-		privateKey.setB(coefficientB, (short) 0, (short) coefficientB.length);
-		privateKey.setG(fixedPointG, (short) 0, (short) fixedPointG.length);
-		privateKey.setR(orderR, (short) 0, (short) orderR.length);
-
-		publicKey.setFieldFP(primeP, (short) 0, (short) primeP.length);
-		publicKey.setA(coefficientA, (short) 0, (short) coefficientA.length);
-		publicKey.setB(coefficientB, (short) 0, (short) coefficientB.length);
-		publicKey.setG(fixedPointG, (short) 0, (short) fixedPointG.length);
-		publicKey.setR(orderR, (short) 0, (short) orderR.length);
-
-		key.genKeyPair();
+		if(keyAssociationFlag)
+			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
 		/** Retrieve Public key details*/
 		byte[] pubKeyBuffer = JCSystem.makeTransientByteArray((short) PUBLIC_KEY_LENGTH, JCSystem.CLEAR_ON_RESET);
 		publicKey.getW(pubKeyBuffer,(short) 0);
@@ -616,7 +559,7 @@ public class ORWL_Keypair extends Applet {
 	}
 
 	/**
-	 * INS 12 - Generate Secret Key
+	 * INS 12 - Generate ECDH Secret Key
 	 * Generate secret key using ECDH algorithm and the public key received and sets the secret key to 3DES algorithm
      * @param apdu - the incoming APDU consists of the public key
      * @exception ISOException - with the response bytes per ISO 7816-4
@@ -624,6 +567,8 @@ public class ORWL_Keypair extends Applet {
 	private void generateSecretKey(APDU apdu){
 		byte[] buffer = apdu.getBuffer();
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+		if(keyAssociationFlag)
+			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
 		/** Retrieve the Public key data sent by ORWL*/
 		byte[] pubKeyBuffer = JCSystem.makeTransientByteArray(bytesRecv, JCSystem.CLEAR_ON_RESET);
 		Util.arrayCopyNonAtomic(buffer,ISO7816.OFFSET_CDATA, pubKeyBuffer, (short)0, bytesRecv);
@@ -644,4 +589,118 @@ public class ORWL_Keypair extends Applet {
 		return desKey.isInitialized();
 	}
 
+	/**
+	 * INS 10 - Confirm ECDH Secret Key
+	 * Confirm the ECDH generated secret key
+     * @param apdu - the incoming APDU consists of sample data encrypted with ECDH key
+     * @exception ISOException - with the response bytes per ISO 7816-4
+     */
+	private void confirmSecretKey(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		short bytesRecv = apdu.setIncomingAndReceive();
+
+		/**Check for KeyFOB association status and ECDH key status*/
+		if (bytesRecv != (byte)sampleData.length)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(keyAssociationFlag)
+			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+		else if(!DESKeyStatus())
+			ISOException.throwIt((short) 0x6669);
+		else{
+			/** Initializes ECDH secret value and decrypt the data */
+			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, buffer, (short) 0);
+			/** Compare the decrypted data with the sample data */
+			byte result = Util.arrayCompare(sampleData, (short)0, buffer, (short)0, bytesRecv);
+			if(result != 0)
+				ISOException.throwIt((short) 0x9405);
+		}
+	}
+
+	/**
+	 * INS 17 - Save all secret Keys
+	 * Save ECDH Secret Key and seed values
+     * @param apdu - the incoming APDU
+     * @exception ISOException - with the response bytes per ISO 7816-4
+     */
+	private void saveSecretKeys(APDU apdu) {
+		short bytesRecv = apdu.setIncomingAndReceive();
+
+		/**Check for Generation and exchange of secret keys, CVM pin verification, block and KeyFOB association status */
+		if (bytesRecv != (byte)0x00)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(keyAssociationFlag)
+			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+		else if(cvmPinBlockStatus() )
+			ISOException.throwIt((short) 0x9D61);
+		else if(!cvmPinVerificationStatus())
+			ISOException.throwIt((short) 0x9840);
+		else if(!DESKeyStatus() || !seedXSaveFlag)
+			ISOException.throwIt((short) 0x6669);
+		else
+			keyAssociationFlag = true;
+	}
+
+	/**
+	 * INS 18 - Save seedX
+	 * Save the shared seedX
+     * @param apdu - the incoming APDU consists of shared seedX
+     * @exception ISOException - with the response bytes per ISO 7816-4
+     */
+	private void saveShareSeedX(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		short bytesRecv = apdu.setIncomingAndReceive();
+		byte keyLength = buffer[ISO7816.OFFSET_P1];
+
+		/**Check for generation of ECDH key and KeyFOB association status */
+		if (keyLength != (byte)SHARED_SEED_LENGTH)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(keyAssociationFlag)
+			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+		else if(!DESKeyStatus())
+			ISOException.throwIt((short) 0x6669);
+		else{
+			/** Initializes ECDH secret value and decrypt the data */
+			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, sharedSeedX, (short) 0);
+			seedXSaveFlag = true;
+		}
+	}
+
+	/**
+	 * INS 19 - Generate and Save seedY
+	 * Generate and Save the shared seedY
+     * @param apdu - the incoming APDU
+     * @return SeedY value
+     * @exception ISOException - with the response bytes per ISO 7816-4
+     */
+	private void retrieveShareSeedY(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+		/**Check for P1 Parameter value */
+		checkForP1Val(buffer);
+
+		/**Check for generation of ECDH key and KeyFOB association status */
+		if (bytesRecv != (byte)0x00)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(keyAssociationFlag || !seedXSaveFlag)
+			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+		else if(!DESKeyStatus())
+			ISOException.throwIt((short) 0x6669);
+		else{
+			/**Generate random value of 24 bytes */
+			randomData.generateData(sharedSeedY, (short)0x00, SHARED_SEED_LENGTH);
+
+			/** Initializes ECDH secret value and encrypt the data */
+			cipherInstance.init(desKey, Cipher.MODE_ENCRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(sharedSeedY, (short) 0, SHARED_SEED_LENGTH, buffer, (short) 0);
+			/** Send R-APDU consists of seedY value*/
+			apdu.setOutgoing();
+			apdu.setOutgoingLength((short) SHARED_SEED_LENGTH );
+			apdu.sendBytesLong(buffer,(short) 0, (short) SHARED_SEED_LENGTH );
+		}
+	}
+
 }
+
+
