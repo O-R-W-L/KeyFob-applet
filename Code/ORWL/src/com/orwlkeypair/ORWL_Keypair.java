@@ -1,25 +1,24 @@
 /**
  * @author chaitra.patil
- * Package AID: 0A 0B 0C 0D 0E 0A
- * Applet AID: 0A 0B 0C 0D 0E 02
+ * Package AID: A0 00 00 07 38 0A
+ * Applet AID: A0 00 00 07 38 01
  * Applet supports following operations
  * 1. Stores the KeyFOB serial number during manufacturing mode
  * 2. Retrieval of KeyFOB details anytime
  * 3. Retrieve KeyFOB association status
  * 4. ECDH key pair generation and secret key generation
  * 5. Exchange and store the seedX and seedY values
- * 6. CVM pin verification
+ * 6. Pin verification
  * 7. Save the KeyFOB name
  * 8. Save all the encryption/decryption keys and complete the association process
  * 9. Decrypt and save the Ble seed token using ECDH secret key and seedX
  * 10. Authenticate the Ble seed challenge, create message digest and encrypt it using the seedY and ECDH key
  * 11. Implements 3DES Algorithm for data encryption and decryption
  * 12. SHA-1 algorithm is used for message digest creation
+ * 13. Implements interface to share the BLE seed obtained during authentication process
+ * 14. BLE seed buffer is reset after it is read once
  */
 package com.orwlkeypair;
-
-import org.globalplatform.CVM;
-import org.globalplatform.GPSystem;
 
 import com.orwlinterface.ORWL_Interface;
 
@@ -29,6 +28,7 @@ import javacard.framework.Applet;
 import javacard.framework.ISO7816;
 import javacard.framework.ISOException;
 import javacard.framework.JCSystem;
+import javacard.framework.OwnerPIN;
 import javacard.framework.Shareable;
 import javacard.framework.Util;
 import javacard.security.DESKey;
@@ -41,28 +41,28 @@ import javacard.security.MessageDigest;
 import javacard.security.RandomData;
 import javacardx.crypto.Cipher;
 
-public class ORWL_Keypair extends Applet implements ORWL_Interface{
+class ORWL_Keypair extends Applet implements ORWL_Interface{
 
 	/**Supported Class byte by this applet*/
-	public final static byte CLA = (byte) 0x90;
+	private final static byte CLA = (byte) 0x90;
 
 	/**Supported INS bytes by this applet*/
-	final static byte INS_GET_KEYFOB_SERIAL_NUM = (byte) 0x20;
-	final static byte INS_GET_KEYFOB_NAME = (byte) 0x22;
+	private final static byte INS_GET_KEYFOB_SERIAL_NUM = (byte) 0x20;
+	private final static byte INS_GET_KEYFOB_NAME = (byte) 0x22;
 
-	final static byte INS_STORE_KEYFOB_SERIAL_NUM = (byte) 0x2A;
-	final static byte INS_STORE_KEYFOB_NAME = (byte) 0x2C;
+	private final static byte INS_STORE_KEYFOB_SERIAL_NUM = (byte) 0x2A;
+	private final static byte INS_STORE_KEYFOB_NAME = (byte) 0x2C;
 
-	final static byte INS_GET_PUBLIC_KEY = (byte) 0x11;
-	final static byte INS_GENERATE_SECRET_KEY = (byte) 0x12;
-	final static byte INS_CONFIRM_SECRET_KEY = (byte) 0x10;
-	final static byte INS_VERIFY_CVM_PIN = (byte) 0x13;
-	final static byte INS_ASSOCIATE_STATUS = (byte) 0x14;
-	final static byte INS_SAVE_SEED_KEY = (byte) 0x15;
-	final static byte INS_AUTH_SEED_KEY = (byte) 0x16;
-	final static byte INS_SAVE_SECRET_KEYS = (byte) 0x17;
-	final static byte INS_SAVE_SHARE_SEED_X = (byte) 0x18;
-	final static byte INS_GET_SHARE_SEED_Y = (byte) 0x19;
+	private final static byte INS_GET_PUBLIC_KEY = (byte) 0x11;
+	private final static byte INS_GENERATE_SECRET_KEY = (byte) 0x12;
+	private final static byte INS_CONFIRM_SECRET_KEY = (byte) 0x10;
+	/*private final static byte INS_VERIFY_PIN = (byte) 0x13;*/
+	private final static byte INS_ASSOCIATE_STATUS = (byte) 0x14;
+	private final static byte INS_SAVE_SEED_KEY = (byte) 0x15;
+	private final static byte INS_AUTH_SEED_KEY = (byte) 0x16;
+	private final static byte INS_SAVE_SECRET_KEYS = (byte) 0x17;
+	private final static byte INS_SAVE_SHARE_SEED_X = (byte) 0x18;
+	private final static byte INS_GET_SHARE_SEED_Y = (byte) 0x19;
 
 	/**
      * The nameAssociatedFlag can have following values: false => Ready for KeyFOB Name association(not yet associated)
@@ -105,9 +105,13 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 	private byte[] sharedSeedY;
 	private static final short SHARED_SEED_LENGTH = 24;
 
-	/** CVM instance*/
-	/*CVM cvm;*/
-	private final static byte[] cvmData = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+	/** OwnerPIN instance*/
+	/*OwnerPIN pin;
+	private final static byte[] pinData = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};*/
+	/** Maximum number of incorrect tries before the PIN is blocked*/
+	final static byte PIN_TRY_LIMIT = (byte) 0x03;
+	/** Maximum PIN size*/
+	final static byte MAX_PIN_SIZE = (byte) 0x08;
 
 	/** Cipher instance*/
 	private Cipher cipherInstance;
@@ -176,11 +180,9 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 		sharedSeedX = new byte[SHARED_SEED_LENGTH];
 		sharedSeedY = new byte[SHARED_SEED_LENGTH];
 
-		/** Create CVM interface handle and update the fixed CVM pin and its limit */
-		/*cvm = GPSystem.getCVM(GPSystem.CVM_GLOBAL_PIN);
-		cvm.setTryLimit((byte) 5);
-		cvm.update(cvmData, (short)0, (byte) cvmData.length, CVM.FORMAT_BCD);
-		cvm.resetState();*/
+		/** Create OwnerPIN interface handle and update the fixed pin and its limit */
+		/*pin = new OwnerPIN(PIN_TRY_LIMIT, MAX_PIN_SIZE);
+		pin.update(pinData, (short)0, (byte) pinData.length);*/
 
 		/** Create 3-DES cipher and key instance*/
 		cipherInstance = Cipher.getInstance(Cipher.ALG_DES_CBC_NOPAD, false);
@@ -259,8 +261,8 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 			case INS_GET_KEYFOB_SERIAL_NUM:
 				getKeyFobSerial(apdu);
 				break;
-			/*case INS_VERIFY_CVM_PIN:
-				verifyCVM(apdu);
+			/*case INS_VERIFY_PIN:
+				verifyPin(apdu);
 				break;*/
 			case INS_ASSOCIATE_STATUS:
 				assosiateStatus(apdu);
@@ -304,12 +306,10 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 		byte[] buffer = apdu.getBuffer();
 		byte keyLength = buffer[ISO7816.OFFSET_P1];
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
-		/**Check for KeyFOB Name association, CVM pin verification, block and Paired key association status */
+		/**Check for KeyFOB Name association, pin verification, block and Paired key association status */
 		if (keyLength != (byte)LENGTH_KEYFOB_NAME_BYTES)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		/*else if(cvmPinBlockStatus() )
-			ISOException.throwIt((short) 0x9D61);
-		else if(!cvmPinVerificationStatus())
+		/*else if(!pinVerificationStatus())
 			ISOException.throwIt((short) 0x9840);*/
 		else if(keyAssociationFlag)
 			ISOException.throwIt((short) 0x6669);
@@ -398,17 +398,17 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 	}
 
 	/**
-	 * INS 13 - Verify CVM Pin
-	 * Verify the CVM Pin required for every session of keypair
-	 * @param apdu - the incoming APDU consists of encrypted CVM pin value
+	 * INS 13 - Verify Pin
+	 * Verify the Pin required for every session of keypair
+	 * @param apdu - the incoming APDU consists of encrypted pin value
 	 * @exception ISOException - with the response bytes per ISO 7816-4
 	 */
-	/*private void verifyCVM(APDU apdu) {
+	/*private void verifyPin(APDU apdu) {
 		byte[] buffer = apdu.getBuffer();
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
 		byte pinLength = buffer[ISO7816.OFFSET_P1];
-		*//**Check for Proper CVM pin length, CVM pin association status and 3DES initialization status *//*
-		if (pinLength != cvmData.length)
+		*//**Check for Proper pin length, pin association status and 3DES initialization status *//*
+		if (pinLength != pinData.length)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 		else if(!DESKeyStatus())
 			ISOException.throwIt((short) 0x6669);
@@ -416,10 +416,9 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 			*//** Initializes ECDH secret value and decrypt the data received *//*
 			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
 			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, buffer, (short) 0);
-			*//**CVM pin verification *//*
-			byte result = (byte)cvm.verify(buffer, (short)0, pinLength, CVM.FORMAT_BCD);
-			if(result != (byte)0x00)
-				ISOException.throwIt((short) 0x9840);
+			*//** Pin verification *//*
+			if (!(pin.check(buffer, (short)0, pinLength)))
+	            ISOException.throwIt((short)0x9840);
 		}
 	}*/
 
@@ -435,7 +434,7 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 		/**Check for P1 Parameter value */
 		checkForP1Val(buffer);
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
-		/**Check for CVM pin verification, block and association status */
+		/**Check for pin verification, block and association status */
 		if (bytesRecv != (byte)0x00)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 		else if(keyAssociationFlag)
@@ -452,12 +451,10 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 		byte[] buffer = apdu.getBuffer();
 		short bytesRecv = apdu.setIncomingAndReceive();
 
-		/**Check for Seed length, CVM pin verification, block and Paired key association status */
+		/**Check for Seed length, pin verification, block and Paired key association status */
 		if (bytesRecv != (byte)SEED_LENGTH)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		/*else if(cvmPinBlockStatus() )
-			ISOException.throwIt((short) 0x9D61);
-		else if(!cvmPinVerificationStatus())
+		/*else if(!pinVerificationStatus())
 			ISOException.throwIt((short) 0x9840);*/
 		else if( !keyAssociationFlag )
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
@@ -487,12 +484,10 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 		/**Check for P1 Parameter value */
 		checkForP1Val(buffer);
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
-		/**Check for CVM pin association, verification, block and Paired key association status */
+		/**Check for pin association, verification, block and Paired key association status */
 		if (bytesRecv != (byte)0x00)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		/*else if(cvmPinBlockStatus() )
-			ISOException.throwIt((short) 0x9D61);
-		else if(!cvmPinVerificationStatus())
+		/*else if(!pinVerificationStatus())
 			ISOException.throwIt((short) 0x9840);*/
 		else if(!keyAssociationFlag)
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
@@ -520,17 +515,10 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 	}
 
 	/**
-	 * Checks for the CVM pin verification status
+	 * Checks for the pin verification status
 	 */
-	/*private boolean cvmPinVerificationStatus() {
-		return cvm.isVerified();
-	}*/
-
-	/**
-	 * Checks for the CVM pin block status
-	 */
-	/*private boolean cvmPinBlockStatus() {
-		return cvm.isBlocked();
+	/*private boolean pinVerificationStatus() {
+		return pin.isValidated();
 	}*/
 
 	/**
@@ -629,14 +617,12 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 	private void saveSecretKeys(APDU apdu) {
 		short bytesRecv = apdu.setIncomingAndReceive();
 
-		/**Check for Generation and exchange of secret keys, CVM pin verification, block and KeyFOB association status */
+		/**Check for Generation and exchange of secret keys, pin verification, block and KeyFOB association status */
 		if (bytesRecv != (byte)0x00)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 		else if(keyAssociationFlag)
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
-		/*else if(cvmPinBlockStatus() )
-			ISOException.throwIt((short) 0x9D61);
-		else if(!cvmPinVerificationStatus())
+/*		else if(!pinVerificationStatus())
 			ISOException.throwIt((short) 0x9840);*/
 		else if(!DESKeyStatus() || !seedXSaveFlag)
 			ISOException.throwIt((short) 0x6669);
@@ -704,14 +690,21 @@ public class ORWL_Keypair extends Applet implements ORWL_Interface{
 		}
 	}
 
+	/**
+	 * Returns the shareable interface object from this applet, on behalf of a request from a client applet.
+     */
 	public Shareable getShareableInterfaceObject(AID clientAID, byte parameter) {
 		return (Shareable) this;
 	}
 
+	/**
+	 * Retrieves the BLE seed saved during authentication process and resets the BLE seed
+     */
 	public short retrieveBleSeed(byte[] buffer, short offset) {
 		Util.arrayCopy(bleSeed, (short) 0, buffer, offset, (short) bleSeed.length);
 		byte[] temp = JCSystem.makeTransientByteArray((short) bleSeed.length, JCSystem.CLEAR_ON_RESET);
 		Util.arrayCopy(temp, (short) 0, bleSeed, offset, (short) bleSeed.length);
 		return (short) bleSeed.length;
 	}
+
 }

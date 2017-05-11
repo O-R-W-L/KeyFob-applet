@@ -1,7 +1,7 @@
 /**
  * @author chaitra.patil
- * Package AID: 0A 0B 0C 0D 0E 0C
- * Applet AID: 0A 0B 0C 0D 0E 03
+ * Package AID: A0 00 00 07 38 0B
+ * Applet AID: A0 00 00 07 38 02
  * Applet supports following operation
  * 1. Retrieval of BLE seed stored during authentication process in ORWL_Keypair applet
  */
@@ -28,7 +28,7 @@ public class ORWL_BLESeed extends Applet {
 	AID keyPairAppletAID;
 	private ORWL_Interface orwlInterfaceInst;
 	/** ORWL_Keypair AID*/
-	byte[] aidBuffer = {0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x02};
+	byte[] aidBuffer = {(byte) 0xA0, 0x00, 0x00, 0x07, 0x38, 0x01};
 
 	/**
 	 * The Constructor registers the applet instance with the JCRE.

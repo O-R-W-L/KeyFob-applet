@@ -2,31 +2,31 @@
 
 <JCProjectParameters>
  <ProjectName>ORWL</ProjectName>
- <ConverterVersion>jcdk 2.2.1</ConverterVersion>
  <SimulationType>SkySIM Argo 2.4</SimulationType>
+ <ConverterVersion>jcdk 2.2.1</ConverterVersion>
  <JCPackageParameters>
-  <Aid SpecificName="PackageAid">0A 0B 0C 0D 0E 0A</Aid>
+  <Aid SpecificName="PackageAid">A0 00 00 07 38 0A</Aid>
   <JCConverterOptions>-debug -out CAP EXP</JCConverterOptions>
   <PackageName>com.orwlkeypair</PackageName>
   <PackageVersion>1.0</PackageVersion>
   <JCAppletParameters>
-   <Aid SpecificName="AppletClassAid">0A 0B 0C 0D 0E 02</Aid>
+   <Aid SpecificName="AppletClassAid">A0 00 00 07 38 01</Aid>
    <AppletName>ORWL_Keypair</AppletName>
   </JCAppletParameters>
  </JCPackageParameters>
  <JCPackageParameters>
-  <Aid SpecificName="PackageAid">0A 0B 0C 0D 0E 0B</Aid>
+  <Aid SpecificName="PackageAid">A0 00 00 07 38 0C</Aid>
   <JCConverterOptions>-debug -out CAP EXP</JCConverterOptions>
   <PackageName>com.orwlinterface</PackageName>
   <PackageVersion>1.0</PackageVersion>
  </JCPackageParameters>
  <JCPackageParameters>
-  <Aid SpecificName="PackageAid">0A 0B 0C 0D 0E 0C</Aid>
+  <Aid SpecificName="PackageAid">A0 00 00 07 38 0B</Aid>
   <JCConverterOptions>-debug -out CAP EXP</JCConverterOptions>
   <PackageName>com.orwlbleseed</PackageName>
   <PackageVersion>1.0</PackageVersion>
   <JCAppletParameters>
-   <Aid SpecificName="AppletClassAid">0A 0B 0C 0D 0E 03</Aid>
+   <Aid SpecificName="AppletClassAid">A0 00 00 07 38 02</Aid>
    <AppletName>ORWL_BLESeed</AppletName>
   </JCAppletParameters>
  </JCPackageParameters>

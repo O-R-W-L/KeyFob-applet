@@ -1,6 +1,6 @@
 /**
  * @author chaitra.patil
- * Package AID: 0A 0B 0C 0D 0E 0B
+ * Package AID: A0 00 00 07 38 0C
  * Interface defines only BLE seed retrieval
  */
 package com.orwlinterface;
