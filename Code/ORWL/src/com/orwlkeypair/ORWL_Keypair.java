@@ -17,6 +17,8 @@
  * 12. SHA-1 algorithm is used for message digest creation
  * 13. Implements interface to share the BLE seed obtained during authentication process
  * 14. BLE seed buffer is reset after it is read once
+ * 15. Save and Retrieve the BLE MAC Address
+ * 16. Update Pin
  */
 package com.orwlkeypair;
 
@@ -49,9 +51,11 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 	/**Supported INS bytes by this applet*/
 	private final static byte INS_GET_KEYFOB_SERIAL_NUM = (byte) 0x20;
 	private final static byte INS_GET_KEYFOB_NAME = (byte) 0x22;
+	private final static byte INS_GET_BLE_MAC = (byte) 0x21;
 
 	private final static byte INS_STORE_KEYFOB_SERIAL_NUM = (byte) 0x2A;
 	private final static byte INS_STORE_KEYFOB_NAME = (byte) 0x2C;
+	private final static byte INS_STORE_BLE_MAC = (byte) 0x2B;
 
 	private final static byte INS_GET_PUBLIC_KEY = (byte) 0x11;
 	private final static byte INS_GENERATE_SECRET_KEY = (byte) 0x12;
@@ -63,6 +67,7 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 	private final static byte INS_SAVE_SECRET_KEYS = (byte) 0x17;
 	private final static byte INS_SAVE_SHARE_SEED_X = (byte) 0x18;
 	private final static byte INS_GET_SHARE_SEED_Y = (byte) 0x19;
+	/*private final static byte INS_UPDATE_PIN = (byte) 0x1A;*/
 
 	/**
      * The nameAssociatedFlag can have following values: false => Ready for KeyFOB Name association(not yet associated)
@@ -75,6 +80,12 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
      * 													   true => KeyFOB serial number already associated
      */
 	private boolean serialAssociatedFlag = false;
+
+	/**
+     * The bleMacAssociatedFlag can have following values: false => Ready for BLE MAC Address association(not yet associated)
+     * 													   true => BLE MAC Address already associated
+     */
+	private boolean bleMacAssociatedFlag = false;
 
 	/**
      * The keyAssociationFlag can have following values: false => KeyFOB ready for association with any ORWL device(not yet associated)
@@ -92,6 +103,10 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 	private byte[] keyfobSerialNum;
 	private static final byte LENGTH_KEYFOB_SERIAL_NUM_BYTES = 4;
 
+	/** Used for storing BLE MAC Address*/
+	private byte[] bleMac;
+	private static final byte LENGTH_BLE_MAC = 6;
+
 	/** SHA-1 generated encrypted message digest length*/
 	private static final short MESSAGE_DIGEST_LENGTH = 24;
 
@@ -107,11 +122,11 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 
 	/** OwnerPIN instance*/
 	/*OwnerPIN pin;
-	private final static byte[] pinData = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};*/
-	/** Maximum number of incorrect tries before the PIN is blocked*/
+	private final static byte[] pinData = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+	*//** Maximum number of incorrect tries before the PIN is blocked*//*
 	final static byte PIN_TRY_LIMIT = (byte) 0x03;
-	/** Maximum PIN size*/
-	final static byte MAX_PIN_SIZE = (byte) 0x08;
+	*//** Maximum PIN size*//*
+	final static byte MAX_PIN_SIZE = (byte) 0x08;*/
 
 	/** Cipher instance*/
 	private Cipher cipherInstance;
@@ -176,6 +191,7 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 		/** Initialize the KeyFOB buffers*/
 		keyfobName = new byte[LENGTH_KEYFOB_NAME_BYTES];
 		keyfobSerialNum = new byte[LENGTH_KEYFOB_SERIAL_NUM_BYTES];
+		bleMac = new byte[LENGTH_BLE_MAC];
 		bleSeed = new byte[SEED_LENGTH];
 		sharedSeedX = new byte[SHARED_SEED_LENGTH];
 		sharedSeedY = new byte[SHARED_SEED_LENGTH];
@@ -252,8 +268,14 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 			case INS_STORE_KEYFOB_NAME:
 				storeKeyFobName(apdu);
 				break;
+			case INS_STORE_BLE_MAC:
+				storeBLEMac(apdu);
+				break;
 			case INS_GET_KEYFOB_NAME:
 				getKeyFobName(apdu);
+				break;
+			case INS_GET_BLE_MAC:
+				getBLEMac(apdu);
 				break;
 			case INS_STORE_KEYFOB_SERIAL_NUM:
 				storeKeyFobSerial(apdu);
@@ -263,6 +285,9 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 				break;
 			/*case INS_VERIFY_PIN:
 				verifyPin(apdu);
+				break;
+			case INS_UPDATE_PIN:
+				updatePin(apdu);
 				break;*/
 			case INS_ASSOCIATE_STATUS:
 				assosiateStatus(apdu);
@@ -309,7 +334,9 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 		/**Check for KeyFOB Name association, pin verification, block and Paired key association status */
 		if (keyLength != (byte)LENGTH_KEYFOB_NAME_BYTES)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		/*else if(!pinVerificationStatus())
+		/*else if(pinBlockStatus())
+			ISOException.throwIt((short) 0x9D61);
+		else if(!pinVerificationStatus())
 			ISOException.throwIt((short) 0x9840);*/
 		else if(keyAssociationFlag)
 			ISOException.throwIt((short) 0x6669);
@@ -407,11 +434,13 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 		byte[] buffer = apdu.getBuffer();
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
 		byte pinLength = buffer[ISO7816.OFFSET_P1];
-		*//**Check for Proper pin length, pin association status and 3DES initialization status *//*
+		*//**Check for Proper pin length, pin block status and 3DES initialization status *//*
 		if (pinLength != pinData.length)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 		else if(!DESKeyStatus())
 			ISOException.throwIt((short) 0x6669);
+		else if(pinBlockStatus())
+			ISOException.throwIt((short) 0x9D61);
 		else {
 			*//** Initializes ECDH secret value and decrypt the data received *//*
 			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
@@ -419,6 +448,34 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 			*//** Pin verification *//*
 			if (!(pin.check(buffer, (short)0, pinLength)))
 	            ISOException.throwIt((short)0x9840);
+		}
+	}*/
+
+	/**
+	 * INS 1A - Update Pin
+	 * Update the Pin value
+	 * @param apdu - the incoming APDU consists of encrypted pin value
+	 * @exception ISOException - with the response bytes per ISO 7816-4
+	 */
+	/*private void updatePin(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+		byte pinLength = buffer[ISO7816.OFFSET_P1];
+		*//**Check for Proper pin length, verification and block status*//*
+		if (pinLength != pinData.length)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if(pinBlockStatus())
+			ISOException.throwIt((short) 0x9D61);
+		else if(!pinVerificationStatus())
+			ISOException.throwIt((short) 0x9840);
+		else {
+			pin.resetAndUnblock();
+			*//**Set initialize secret values and decrypt the data received into APDU buffer for pin update and verification*//*
+			cipherInstance.init(desKey, Cipher.MODE_DECRYPT, IVVal, (short) 0, (short) IVVal.length);
+			cipherInstance.doFinal(buffer, ISO7816.OFFSET_CDATA, bytesRecv, buffer, (short) 0);
+			pin.update(buffer, (short) 0, pinLength);
+			pin.reset();
+			pin.check(buffer, (short)0, pinLength);
 		}
 	}*/
 
@@ -434,7 +491,7 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 		/**Check for P1 Parameter value */
 		checkForP1Val(buffer);
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
-		/**Check for pin verification, block and association status */
+		/**Check for KeyFOB association status */
 		if (bytesRecv != (byte)0x00)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 		else if(keyAssociationFlag)
@@ -454,7 +511,9 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 		/**Check for Seed length, pin verification, block and Paired key association status */
 		if (bytesRecv != (byte)SEED_LENGTH)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		/*else if(!pinVerificationStatus())
+		/*else if(pinBlockStatus())
+			ISOException.throwIt((short) 0x9D61);
+		else if(!pinVerificationStatus())
 			ISOException.throwIt((short) 0x9840);*/
 		else if( !keyAssociationFlag )
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
@@ -484,10 +543,12 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 		/**Check for P1 Parameter value */
 		checkForP1Val(buffer);
 		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
-		/**Check for pin association, verification, block and Paired key association status */
+		/**Check for pin verification, block and Paired key association status */
 		if (bytesRecv != (byte)0x00)
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
-		/*else if(!pinVerificationStatus())
+		/*else if(pinBlockStatus())
+			ISOException.throwIt((short) 0x9D61);
+		else if(!pinVerificationStatus())
 			ISOException.throwIt((short) 0x9840);*/
 		else if(!keyAssociationFlag)
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
@@ -519,6 +580,15 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 	 */
 	/*private boolean pinVerificationStatus() {
 		return pin.isValidated();
+	}*/
+
+	/**
+	 * Checks for the pin block status
+	 */
+	/*private boolean pinBlockStatus() {
+		if(pin.getTriesRemaining() == 0)
+			return true;
+		return false;
 	}*/
 
 	/**
@@ -622,7 +692,9 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
 		else if(keyAssociationFlag)
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
-/*		else if(!pinVerificationStatus())
+		/*else if(pinBlockStatus())
+			ISOException.throwIt((short) 0x9D61);
+		else if(!pinVerificationStatus())
 			ISOException.throwIt((short) 0x9840);*/
 		else if(!DESKeyStatus() || !seedXSaveFlag)
 			ISOException.throwIt((short) 0x6669);
@@ -705,6 +777,51 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 		byte[] temp = JCSystem.makeTransientByteArray((short) bleSeed.length, JCSystem.CLEAR_ON_RESET);
 		Util.arrayCopy(temp, (short) 0, bleSeed, offset, (short) bleSeed.length);
 		return (short) bleSeed.length;
+	}
+
+	/**
+	 * INS 2B - Save BLE MAC Address
+	 * Store the BLE MAC Address
+	 * @param apdu - the incoming APDU consists of BLE MAC Address
+	 * @exception ISOException - with the response bytes per ISO 7816-4
+	 */
+	private void storeBLEMac(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		/**Check for P1 Parameter value */
+		checkForP1Val(buffer);
+		/**Check for BLE MAC association */
+		if( bleMacAssociatedFlag )
+			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+		else{
+			byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+			/** Store the KeyFOB BLE MAC Address */
+			Util.arrayCopy(buffer, ISO7816.OFFSET_CDATA, bleMac, (short)0, (short)bytesRecv);
+			bleMacAssociatedFlag = true;
+		}
+	}
+
+	/**
+	 * INS 21 - Retrieve BLE MAC Address
+	 * Retrieve BLE MAC Address if KeyFOB already has a BLE MAC Address associated
+	 * @param apdu - the incoming APDU
+	 * @return BLE MAC Address
+	 * @exception ISOException - with the response bytes per ISO 7816-4
+	 */
+	private void getBLEMac(APDU apdu) {
+		byte[] buffer = apdu.getBuffer();
+		/**Check for P1 Parameter value */
+		checkForP1Val(buffer);
+		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
+		/**Check for Proper length and BLE MAC association */
+		if (bytesRecv != (byte)0x00)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if( !bleMacAssociatedFlag )
+			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+		else{
+			Util.arrayCopy(bleMac, (short)0, buffer, (short)0, LENGTH_BLE_MAC);
+			/** Send R-APDU containing BLE MAC Address*/
+			apdu.setOutgoingAndSend((short) 0, (short) LENGTH_BLE_MAC );
+		}
 	}
 
 }
