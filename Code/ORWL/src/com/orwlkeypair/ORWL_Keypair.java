@@ -101,7 +101,7 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 
 	/** Used for storing KeyFOB Serial Number*/
 	private byte[] keyfobSerialNum;
-	private static final byte LENGTH_KEYFOB_SERIAL_NUM_BYTES = 4;
+	private static final byte LENGTH_KEYFOB_SERIAL_NUM_BYTES = 28;
 
 	/** Used for storing BLE MAC Address*/
 	private byte[] bleMac;
@@ -387,13 +387,15 @@ class ORWL_Keypair extends Applet implements ORWL_Interface{
 	 */
 	private void storeKeyFobSerial(APDU apdu) {
 		byte[] buffer = apdu.getBuffer();
+		byte bytesRecv = (byte) apdu.setIncomingAndReceive();
 		/**Check for P1 Parameter value */
 		checkForP1Val(buffer);
 		/**Check for KeyFOB Serial Number association */
-		if( serialAssociatedFlag )
+		if (bytesRecv != (byte)LENGTH_KEYFOB_SERIAL_NUM_BYTES)
+			ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+		else if( serialAssociatedFlag )
 			ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
 		else{
-			byte bytesRecv = (byte) apdu.setIncomingAndReceive();
 			/** Store the KeyFOB serial number */
 			Util.arrayCopy(buffer, ISO7816.OFFSET_CDATA, keyfobSerialNum, (short)0, (short)bytesRecv);
 			serialAssociatedFlag = true;
